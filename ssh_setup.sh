@@ -2,8 +2,8 @@
 #
 # SSH 一键配置脚本（交互式菜单 + 命令行模式）
 # 功能：安装/配置 SSH，管理公钥，修改用户密码，自动测试与回滚
-# 支持发行版：Debian/Ubuntu, RHEL/CentOS/Fedora, Arch, openSUSE 等
-# 依赖：bash, sed, grep, awk, cat, (可选) systemctl/service, chpasswd/passwd
+# 支持发行版：Debian/Ubuntu, RHEL/CentOS/Fedora, Arch, openSUSE, Alpine (OpenRC)
+# 依赖：bash, sed, grep, awk, cat, (可选) systemctl/service/rc-service, chpasswd/passwd
 #
 
 set -e
@@ -44,6 +44,10 @@ detect_os() {
         PKG_INSTALL="yum install -y"
         PKG_UPDATE="yum check-update"
         PKG_LIST="openssh-server"
+    elif command -v apk &>/dev/null; then
+        PKG_INSTALL="apk add"
+        PKG_UPDATE="apk update"
+        PKG_LIST="openssh-server"
     elif command -v pacman &>/dev/null; then
         PKG_INSTALL="pacman -S --noconfirm"
         PKG_UPDATE="pacman -Sy"
@@ -71,10 +75,21 @@ install_ssh() {
 
 # 检测服务名称
 detect_service() {
+    # 优先检测 OpenRC (Alpine)
+    if [ -x "/etc/init.d/sshd" ] && command -v rc-service &>/dev/null; then
+        SSHD_SERVICE="sshd"
+        return
+    elif [ -x "/etc/init.d/ssh" ] && command -v rc-service &>/dev/null; then
+        SSHD_SERVICE="ssh"
+        return
+    fi
+
+    # 其次 systemd
     if systemctl list-units --type=service 2>/dev/null | grep -q 'sshd.service'; then
         SSHD_SERVICE="sshd"
     elif systemctl list-units --type=service 2>/dev/null | grep -q 'ssh.service'; then
         SSHD_SERVICE="ssh"
+    # 传统 init.d
     elif [ -x "/etc/init.d/sshd" ]; then
         SSHD_SERVICE="sshd"
     elif [ -x "/etc/init.d/ssh" ]; then
@@ -86,6 +101,12 @@ detect_service() {
 
 # 重启 sshd
 restart_sshd() {
+    # 优先使用 OpenRC
+    if command -v rc-service &>/dev/null && [ -n "$SSHD_SERVICE" ]; then
+        rc-service "$SSHD_SERVICE" restart 2>/dev/null && return
+        print_warn "rc-service 重启失败，尝试其他方式。"
+    fi
+
     if [ -z "$SSHD_SERVICE" ]; then
         if command -v systemctl &>/dev/null; then
             systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || print_warn "重启服务失败，请手动重启。"
@@ -524,7 +545,7 @@ main_menu() {
         echo "4. 访问控制（用户/组）"
         echo "5. 其他选项（保活/超时/DNS等）"
         echo "6. 公钥管理"
-        echo "7. 用户密码管理"          # 新增
+        echo "7. 用户密码管理"
         echo "8. 备份管理"
         echo "9. 应用配置并重启 SSH（测试 + 重启）"
         echo "10. 退出"
@@ -538,7 +559,7 @@ main_menu() {
             4) menu_access ;;
             5) menu_other ;;
             6) menu_keys ;;
-            7) menu_password ;;          # 新增
+            7) menu_password ;;
             8) menu_backup ;;
             9) apply_config; read -p "按回车继续..." ;;
             10)
