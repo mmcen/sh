@@ -1,9 +1,11 @@
 #!/bin/bash
 #
 # SSH 一键配置脚本（交互式菜单 + 命令行模式）
-# 功能：安装/配置 SSH，管理公钥，修改用户密码，自动测试与回滚
+# 功能：安装/配置 SSH，管理公钥，修改用户密码，自动测试与回滚，重装 SSH 服务
 # 支持发行版：Debian/Ubuntu, RHEL/CentOS/Fedora, Arch, openSUSE, Alpine (OpenRC)
 # 依赖：bash, sed, grep, awk, cat, (可选) systemctl/service/rc-service, chpasswd/passwd
+#
+# 版本：2.0 (新增重装 SSH 服务)
 #
 
 set -e
@@ -35,26 +37,32 @@ detect_os() {
     if command -v apt &>/dev/null; then
         PKG_INSTALL="apt install -y"
         PKG_UPDATE="apt update"
+        PKG_REMOVE="apt remove -y"
         PKG_LIST="openssh-server"
     elif command -v dnf &>/dev/null; then
         PKG_INSTALL="dnf install -y"
         PKG_UPDATE="dnf check-update"
+        PKG_REMOVE="dnf remove -y"
         PKG_LIST="openssh-server"
     elif command -v yum &>/dev/null; then
         PKG_INSTALL="yum install -y"
         PKG_UPDATE="yum check-update"
+        PKG_REMOVE="yum remove -y"
         PKG_LIST="openssh-server"
     elif command -v apk &>/dev/null; then
         PKG_INSTALL="apk add"
         PKG_UPDATE="apk update"
+        PKG_REMOVE="apk del"
         PKG_LIST="openssh-server"
     elif command -v pacman &>/dev/null; then
         PKG_INSTALL="pacman -S --noconfirm"
         PKG_UPDATE="pacman -Sy"
+        PKG_REMOVE="pacman -R --noconfirm"
         PKG_LIST="openssh"
     elif command -v zypper &>/dev/null; then
         PKG_INSTALL="zypper install -y"
         PKG_UPDATE="zypper refresh"
+        PKG_REMOVE="zypper remove -y"
         PKG_LIST="openssh"
     else
         print_error "不支持的操作系统或包管理器，请手动安装 openssh-server。"
@@ -122,6 +130,32 @@ restart_sshd() {
             service "$SSHD_SERVICE" restart || print_warn "重启 $SSHD_SERVICE 失败，请手动重启。"
         else
             /etc/init.d/"$SSHD_SERVICE" restart || print_warn "重启 $SSHD_SERVICE 失败，请手动重启。"
+        fi
+    fi
+}
+
+# 停止 sshd（用于重装）
+stop_sshd() {
+    if command -v rc-service &>/dev/null && [ -n "$SSHD_SERVICE" ]; then
+        rc-service "$SSHD_SERVICE" stop 2>/dev/null && return
+        print_warn "rc-service 停止失败，尝试其他方式。"
+    fi
+
+    if [ -z "$SSHD_SERVICE" ]; then
+        if command -v systemctl &>/dev/null; then
+            systemctl stop sshd 2>/dev/null || systemctl stop ssh 2>/dev/null || print_warn "停止服务失败，请手动停止。"
+        elif command -v service &>/dev/null; then
+            service sshd stop 2>/dev/null || service ssh stop 2>/dev/null || print_warn "停止服务失败，请手动停止。"
+        else
+            /etc/init.d/sshd stop 2>/dev/null || /etc/init.d/ssh stop 2>/dev/null || print_warn "停止服务失败，请手动停止。"
+        fi
+    else
+        if command -v systemctl &>/dev/null; then
+            systemctl stop "$SSHD_SERVICE" || print_warn "停止 $SSHD_SERVICE 失败，请手动停止。"
+        elif command -v service &>/dev/null; then
+            service "$SSHD_SERVICE" stop || print_warn "停止 $SSHD_SERVICE 失败，请手动停止。"
+        else
+            /etc/init.d/"$SSHD_SERVICE" stop || print_warn "停止 $SSHD_SERVICE 失败，请手动停止。"
         fi
     fi
 }
@@ -294,6 +328,70 @@ change_password_random() {
     else
         print_error "设置随机密码失败，请尝试交互式修改。"
     fi
+}
+
+# ------------------------------------------------------------
+# 重装 SSH 服务函数
+# ------------------------------------------------------------
+reinstall_ssh() {
+    clear
+    print_title "重装 SSH 服务"
+    echo -e "${RED}警告：此操作将停止 SSH 服务并卸载 openssh-server 软件包。${NC}"
+    echo -e "${RED}如果您通过 SSH 远程连接，执行后连接将中断！${NC}"
+    read -p "确认继续？(y/n): " confirm
+    [[ $confirm != [yY] ]] && return
+
+    # 1. 备份配置
+    read -p "是否备份当前配置？(y/n, 默认 y): " bak_confirm
+    if [[ -z "$bak_confirm" || $bak_confirm == [yY] ]]; then
+        backup_config
+    fi
+
+    # 2. 停止服务
+    print_info "正在停止 SSH 服务..."
+    stop_sshd
+
+    # 3. 卸载软件包
+    print_info "正在卸载 $PKG_LIST ..."
+    eval "$PKG_REMOVE $PKG_LIST" || print_error "卸载失败，请手动处理。"
+
+    # 4. 询问是否彻底删除配置文件（清除）
+    read -p "是否删除现有配置文件 ($SSHD_CONFIG)？(y/n, 默认 n): " clean_confirm
+    if [[ $clean_confirm == [yY] ]]; then
+        if [ -f "$SSHD_CONFIG" ]; then
+            rm -f "$SSHD_CONFIG"
+            print_info "已删除 $SSHD_CONFIG"
+        fi
+        # 可选删除其他可能残留（如 sshd_config.d 等），保留主要
+    fi
+
+    # 5. 重新安装
+    print_info "正在重新安装 $PKG_LIST ..."
+    install_ssh   # 此函数会检测是否已安装，若不存在则安装
+
+    # 6. 恢复配置（如果有备份且用户选择）
+    if [ -n "$BACKUP_FILE" ] && [ -f "$BACKUP_FILE" ]; then
+        read -p "是否恢复之前备份的配置文件？(y/n, 默认 n): " restore_confirm
+        if [[ $restore_confirm == [yY] ]]; then
+            cp -f "$BACKUP_FILE" "$SSHD_CONFIG"
+            print_info "已恢复配置 $BACKUP_FILE"
+            CONFIG_CHANGED=true
+        else
+            print_info "使用默认配置。"
+            # 如果用户不恢复，但之前备份文件存在，删除备份以免干扰
+            rm -f "$BACKUP_FILE"
+            BACKUP_FILE=""
+        fi
+    else
+        print_info "没有可恢复的备份，使用默认配置。"
+    fi
+
+    # 7. 重启服务
+    print_info "正在重启 SSH 服务..."
+    restart_sshd
+
+    print_info "SSH 服务重装完成。"
+    read -p "按回车返回菜单..."
 }
 
 # ------------------------------------------------------------
@@ -480,7 +578,7 @@ menu_keys() {
     done
 }
 
-# 新增：密码管理菜单
+# 密码管理菜单
 menu_password() {
     while true; do
         clear
@@ -548,10 +646,11 @@ main_menu() {
         echo "7. 用户密码管理"
         echo "8. 备份管理"
         echo "9. 应用配置并重启 SSH（测试 + 重启）"
-        echo "10. 退出"
+        echo "10. 重装 SSH 服务"
+        echo "11. 退出"
         echo "---------------------------------------------"
         echo -e "${YELLOW}提示：所有修改暂存于配置文件中，请执行 [9] 使生效。${NC}"
-        read -p "请选择 [1-10]: " choice
+        read -p "请选择 [1-11]: " choice
         case $choice in
             1) show_current_config ;;
             2) menu_basic ;;
@@ -562,7 +661,8 @@ main_menu() {
             7) menu_password ;;
             8) menu_backup ;;
             9) apply_config; read -p "按回车继续..." ;;
-            10)
+            10) reinstall_ssh ;;
+            11)
                 if [ "$CONFIG_CHANGED" = true ]; then
                     read -p "有未应用的更改，确定退出？(y/n): " confirm
                     [[ $confirm != [yY] ]] && continue
