@@ -61,9 +61,14 @@ chmod 755 "$LIB_DIR/sbox"
 "$LIB_DIR/sbox" version | head -1
 
 # ---------- 初始配置 ----------
-if [ ! -f "$ETC_DIR/config.json" ]; then
-  jq -n --arg l "$LOGF" '{log:{level:"info",output:$l},inbounds:[],outbounds:[{type:"direct",tag:"direct"}]}' > "$ETC_DIR/config.json"
-  echo ">> 已生成初始配置 $ETC_DIR/config.json"
+DNSDEF='{"servers":[{"type":"local","tag":"local"}],"final":"local"}'
+if [ ! -s "$ETC_DIR/config.json" ]; then
+  jq -n --arg l "$LOGF" --argjson d "$DNSDEF" '{log:{level:"info",output:$l},dns:$d,inbounds:[],outbounds:[{type:"direct",tag:"direct"}]}' > "$ETC_DIR/config.json.tmp" \
+    && mv -f "$ETC_DIR/config.json.tmp" "$ETC_DIR/config.json" && echo ">> 已生成初始配置 $ETC_DIR/config.json"
+elif ! jq -e '.dns' "$ETC_DIR/config.json" >/dev/null 2>&1; then
+  jq --argjson d "$DNSDEF" '.dns=$d' "$ETC_DIR/config.json" > "$ETC_DIR/config.json.tmp" \
+    && mv "$ETC_DIR/config.json.tmp" "$ETC_DIR/config.json" \
+    && echo ">> 已迁移现有配置: 补 local DNS（修复 cloudflared 回环解析 localhost 失败）"
 fi
 
 # ---------- 管理菜单 ----------
@@ -141,7 +146,8 @@ load_cfg() { [ -f "$CFG" ] || { err "$CFG 不存在，请先运行安装脚本";
 
 apply_cfg() { # $CFG 已由子流程改到 $TMPNEW
   local tmp; tmp=$(mktemp)
-  if ! jq . "$TMPNEW" >"$tmp" 2>/dev/null; then err "JSON 语法错误，已放弃"; rm -f "$tmp"; return 1; fi
+  jq 'if (.dns == null) then .dns = {servers:[{type:"local",tag:"local"}],final:"local"} else . end' "$TMPNEW" >"$tmp" 2>/dev/null
+  if ! jq . "$tmp" >/dev/null 2>&1; then err "JSON 语法错误，已放弃"; rm -f "$tmp"; return 1; fi
   if ! "$BIN" check -c "$tmp" 2>/tmp/sbox-check.err; then err "配置校验失败：$(tail -2 /tmp/sbox-check.err | tr '\n' ' ')"; rm -f "$tmp"; return 1; fi
   mkdir -p "$ETC/backup"
   cp "$CFG" "$ETC/backup/config.$(date +%Y%m%d-%H%M%S).json" 2>/dev/null
@@ -238,6 +244,8 @@ add_cloudflared() {
     jq --arg t "$tag" --arg o "$out" '.route = ((.route // {}) | .rules = ((.rules // []) + [{inbound:$t,outbound:$o}]))' "$TMPNEW" >"$TMPNEW2" && mv "$TMPNEW2" "$TMPNEW"
   fi
   ok "已添加 cloudflared 入口 tag=$tag"
+  echo "提示: CF 后台 Public Hostname 的 Service 填 http://localhost:<本机vless-ws端口> 即可回环，"
+  echo "      面板已自动保证 local DNS 可解析 localhost"
 }
 add_socks() {
   local port listen user pass tag inb
