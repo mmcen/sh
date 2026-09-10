@@ -233,7 +233,7 @@ add_cloudflared() {
   printf "Cloudflare Tunnel Token (零信任里创建): "; read -r tok
   [ -n "$tok" ] || { err "token 不能为空"; return; }
   tag="cf-tunnel-$(date +%s | tail -c5)"
-  inb=$(jq -n --arg tag "$tag" --arg tok "$tok" '{type:"cloudflared",tag:$tag,token:$tok,ha_connections:3}')
+  inb=$(jq -n --arg tag "$tag" --arg tok "$tok" '{type:"cloudflared",tag:$tag,token:$tok,ha_connections:4}')
   cp "$CFG" "$TMPNEW"; jq --argjson i "$inb" '.inbounds += [$i]' "$CFG" >"$TMPNEW"
   echo "隧道流量去向:"; echo "  [1] direct 直连回源(默认)"
   local outs; outs=$(jq -r '[.outbounds[]?|select(.type!="direct")|.tag]|join(",")' "$CFG")
